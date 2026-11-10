@@ -40,10 +40,10 @@ from python_multipart.multipart import (
 from .compat import parametrize, parametrize_class
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from typing import Any, TypedDict
 
-    from python_multipart.multipart import FileConfig
+    from python_multipart.multipart import FileConfig, QuerystringCallbacks
 
     class TestParams(TypedDict):
         name: str
@@ -911,6 +911,65 @@ def test_multipart_opening_boundary_max_size() -> None:
     assert parser.write(data[max_size:]) == len(data) - max_size
     parser.finalize()
     assert events == ["begin", "end"]
+
+
+def test_querystring_events_do_not_depend_on_chunk_boundaries() -> None:
+    data = b"a=1&b=&&c&=2&d=x=y&"
+
+    def parse(chunks: list[bytes]) -> list[tuple[str, bytes]]:
+        events: list[tuple[str, bytes]] = []
+
+        def on_data(name: str) -> Callable[[bytes, int, int], None]:
+            return lambda data, start, end: events.append((name, data[start:end]))
+
+        def on_event(name: str) -> Callable[[], None]:
+            return lambda: events.append((name, b""))
+
+        callbacks: QuerystringCallbacks = {
+            "on_field_start": on_event("field_start"),
+            "on_field_name": on_data("field_name"),
+            "on_field_data": on_data("field_data"),
+            "on_field_end": on_event("field_end"),
+            "on_end": on_event("end"),
+        }
+        parser = QuerystringParser(callbacks)
+        for chunk in chunks:
+            parser.write(chunk)
+        parser.finalize()
+
+        # Merge adjacent data events, since a split can break one value into several callbacks.
+        merged: list[tuple[str, bytes]] = []
+        for name, value in events:
+            if merged and value and merged[-1][0] == name:
+                merged[-1] = (name, merged[-1][1] + value)
+            else:
+                merged.append((name, value))
+        return merged
+
+    expected = parse([data])
+    assert expected == [
+        ("field_start", b""),
+        ("field_name", b"a"),
+        ("field_data", b"1"),
+        ("field_end", b""),
+        ("field_start", b""),
+        ("field_name", b"b"),
+        ("field_end", b""),
+        ("field_start", b""),
+        ("field_name", b"c"),
+        ("field_end", b""),
+        ("field_start", b""),
+        ("field_data", b"2"),
+        ("field_end", b""),
+        ("field_start", b""),
+        ("field_name", b"d"),
+        ("field_data", b"x=y"),
+        ("field_end", b""),
+        ("end", b""),
+    ]
+    for i in range(1, len(data)):
+        assert parse([data[:i], data[i:]]) == expected
+    assert parse([data[i : i + 1] for i in range(len(data))]) == expected
 
 
 @pytest.mark.parametrize(

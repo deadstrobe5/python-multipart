@@ -888,6 +888,7 @@ class QuerystringParser(BaseParser):
             on_field_end = _noop_event
 
         i = 0
+        sep_pos = -1
         while i < length:
             ch = data[i]
 
@@ -982,8 +983,10 @@ class QuerystringParser(BaseParser):
                         i = length
 
             elif state == FIELD_DATA:
-                # Try finding an ampersand after this position.
-                sep_pos = data.find(b"&", i, length)
+                # Try finding an ampersand after this position, unless the
+                # field name search already found the next one.
+                if sep_pos < i:
+                    sep_pos = data.find(b"&", i, length)
 
                 # If we found it, callback this bit as data and then go back
                 # to expecting to find a field.
@@ -992,12 +995,18 @@ class QuerystringParser(BaseParser):
                         on_field_data(data, i, sep_pos)
                     on_field_end()
 
-                    # Note that we go to the separator, which brings us to the
-                    # "before field" state.  This allows us to properly emit
-                    # "field_start" events only when we actually have data for
-                    # a field of some sort.
-                    i = sep_pos - 1
-                    state = BEFORE_FIELD
+                    # If a field follows the separator in this chunk, start it
+                    # right away.  Otherwise, we go to the separator, which
+                    # brings us to the "before field" state.  This allows us to
+                    # properly emit "field_start" events only when we actually
+                    # have data for a field of some sort.
+                    if sep_pos + 1 < length and data[sep_pos + 1] != AMPERSAND:
+                        on_field_start()
+                        i = sep_pos
+                        state = FIELD_NAME
+                    else:
+                        i = sep_pos - 1
+                        state = BEFORE_FIELD
 
                 # Otherwise, emit the rest as data and finish.
                 else:

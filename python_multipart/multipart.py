@@ -1279,6 +1279,15 @@ class MultipartParser(BaseParser):
                     index += 1
 
             elif state == HEADER_FIELD_START:
+                if data.startswith(b"\r\n", i, length):
+                    # A blank line ends the headers, and the part data starts right after it.
+                    self.callback("headers_finished")
+                    self.marks["part_data"] = i + 2
+                    index = 0
+                    state = PART_DATA
+                    i += 2
+                    continue
+
                 # Mark the start of a header field here, reset the index, and
                 # continue parsing our header field.
                 index = 0
@@ -1373,7 +1382,12 @@ class MultipartParser(BaseParser):
                     data_callback("header_value", i)
                     self.callback("header_end")
                     current_header_size = 0
-                    state = HEADER_VALUE_ALMOST_DONE
+                    if data.startswith(b"\r\n", cr, length):
+                        # The whole line ending is here, so go straight to the next header.
+                        i += 1
+                        state = HEADER_FIELD_START
+                    else:
+                        state = HEADER_VALUE_ALMOST_DONE
                 else:
                     i = length
 
@@ -1399,15 +1413,10 @@ class MultipartParser(BaseParser):
                     raise MultipartParseError(msg, offset=i)
 
                 self.callback("headers_finished")
-                state = PART_DATA_START
 
-            elif state == PART_DATA_START:
-                # Mark the start of our part data.
-                set_mark("part_data")
-
-                # Start processing part data, including this character.
+                # Part data starts with the next byte.
+                self.marks["part_data"] = i + 1
                 state = PART_DATA
-                i -= 1
 
             elif state == PART_DATA:
                 # We're processing our part data right now.  During this, we
@@ -1426,6 +1435,19 @@ class MultipartParser(BaseParser):
                     # Calling `find` is much faster than iterating here.
                     i0 = data.find(boundary, i, length)
                     if i0 >= 0:
+                        # The usual case: the whole delimiter line is in the buffer, so finish the part
+                        # here instead of stepping through the CRLF one byte at a time.
+                        after = i0 + boundary_length
+                        if data.startswith(b"\r\n", after, length):
+                            data_callback("part_data", i0)
+                            self.callback("part_end")
+                            self.callback("part_begin")
+                            current_header_count = 0
+                            current_header_size = 0
+                            state = HEADER_FIELD_START
+                            i = after + 2
+                            continue
+
                         # We matched the whole boundary string.
                         index = boundary_length - 1
                         i = i0 + boundary_length - 1
